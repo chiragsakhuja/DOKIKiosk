@@ -12,20 +12,27 @@ import android.support.v7.widget.Toolbar;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.widget.Button;
 import android.widget.TextView;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.MalformedURLException;
+import java.net.URL;
 import java.util.UUID;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 public class Home extends AppCompatActivity {
-    private BluetoothAdapter mBluetoothAdapter;
-    private TextView bluetooth_status;
-    private TextView main_message;
+    private BluetoothAdapter bluetoothAdapter;
+    private TextView bluetoothStatus;
+    private TextView mainMessage;
     private boolean serverRunning = false;
     private AcceptThread serverSocketThread;
-    private Handler bluetooth_handler, main_handler;
+    private Handler bluetoothHandler, mainHandler;
+    private ServerChannel serverUpdate;
 
     private final static int MESSAGE_RECEIVED = 1;
     private final static int UPDATE_BLUETOOTH_STATUS = 2;
@@ -37,48 +44,69 @@ public class Home extends AppCompatActivity {
         Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
 
-        bluetooth_status = (TextView) findViewById(R.id.bluetooth_status);
-        main_message = (TextView) findViewById(R.id.main_message);
+        // Set up handlers for display elements
+        bluetoothStatus = (TextView) findViewById(R.id.bluetooth_status);
+        mainMessage = (TextView) findViewById(R.id.main_message);
 
-        main_handler = new Handler() {
+        mainHandler = new Handler() {
             public void handleMessage(Message msg) {
                 if (msg.what == MESSAGE_RECEIVED) {
-                    main_message.setText(new String((byte[]) msg.obj));
+                    mainMessage.setText(new String((byte[]) msg.obj));
                 }
             }
         };
 
-        bluetooth_handler = new Handler() {
+        bluetoothHandler = new Handler() {
             public void handleMessage(Message msg) {
                 if (msg.what == UPDATE_BLUETOOTH_STATUS) {
-                    bluetooth_status.setText((String) msg.obj);
+                    bluetoothStatus.setText((String) msg.obj);
                 }
             }
         };
 
-        mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-        if (mBluetoothAdapter == null) {
-            bluetooth_status.setText("Sorry, this device does not support Bluetooth");
+        // Set up bluetooth
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        if (bluetoothAdapter == null) {
+            bluetoothStatus.setText("Sorry, this device does not support Bluetooth");
         } else {
-            if (!mBluetoothAdapter.isEnabled()) {
-                mBluetoothAdapter.enable();
+            if (!bluetoothAdapter.isEnabled()) {
+                bluetoothAdapter.enable();
             }
-            String macAddress = android.provider.Settings.Secure.getString(getApplicationContext().getContentResolver(), "bluetooth_address");
-            bluetooth_status.setText(macAddress);
         }
+
+        serverSocketThread = new AcceptThread(bluetoothAdapter);
+        serverSocketThread.start();
+        serverRunning = true;
 
         FloatingActionButton fab = (FloatingActionButton) findViewById(R.id.fab);
         fab.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 if (serverRunning == false) {
-                    serverSocketThread = new AcceptThread(mBluetoothAdapter);
+                    serverSocketThread = new AcceptThread(bluetoothAdapter);
                     serverSocketThread.start();
                 } else {
                     serverSocketThread.cancel();
                 }
 
                 serverRunning = !serverRunning;
+            }
+        });
+
+        serverUpdate = new ServerChannel(getResources().getString(R.string.server_url) + "/update");
+        Button register_button = (Button) findViewById(R.id.register_button);
+        register_button.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                final JSONObject kioskInfo = new JSONObject();
+                try {
+                    String macAddress = android.provider.Settings.Secure.getString(getApplicationContext().getContentResolver(), "bluetooth_address");
+                    kioskInfo.put("name", R.string.kiosk_name);
+                    kioskInfo.put("mac", macAddress);
+                    serverUpdate.postData(kioskInfo);
+                } catch (JSONException e) {
+                    e.printStackTrace();
+                }
             }
         });
     }
@@ -107,7 +135,7 @@ public class Home extends AppCompatActivity {
 
     private class AcceptThread extends Thread {
         private final BluetoothServerSocket mmServerSocket;
-        private final String NAME = "DOKI Mobile";
+        private final String NAME = "DOKI Kiosk";
         private final UUID MY_UUID = new UUID(0x0000000000000000L, 0xdeadbeef0badcafeL);
 
         public AcceptThread(BluetoothAdapter mBluetoothAdapter) {
@@ -116,12 +144,12 @@ public class Home extends AppCompatActivity {
             BluetoothServerSocket tmp = null;
             try {
                 // MY_UUID is the app's UUID string, also used by the client code
-                tmp = mBluetoothAdapter.listenUsingRfcommWithServiceRecord(NAME, MY_UUID);
+                tmp = mBluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord(NAME, MY_UUID);
             } catch (IOException e) {
             }
             mmServerSocket = tmp;
 
-            bluetooth_handler.obtainMessage(UPDATE_BLUETOOTH_STATUS, -1, -1, "Waiting for connection").sendToTarget();
+            bluetoothHandler.obtainMessage(UPDATE_BLUETOOTH_STATUS, -1, -1, "Waiting for connection").sendToTarget();
         }
 
         public void run() {
@@ -148,7 +176,7 @@ public class Home extends AppCompatActivity {
         }
 
         public void manageConnectedSocket(BluetoothSocket socket) {
-            bluetooth_handler.obtainMessage(UPDATE_BLUETOOTH_STATUS, -1, -1, "Waiting for message").sendToTarget();
+            bluetoothHandler.obtainMessage(UPDATE_BLUETOOTH_STATUS, -1, -1, "Waiting for message").sendToTarget();
             ConnectedThread thread = new ConnectedThread(socket);
             thread.start();
         }
@@ -158,7 +186,7 @@ public class Home extends AppCompatActivity {
          */
         public void cancel() {
             try {
-                bluetooth_handler.obtainMessage(UPDATE_BLUETOOTH_STATUS, -1, -1, "Server not running").sendToTarget();
+                bluetoothHandler.obtainMessage(UPDATE_BLUETOOTH_STATUS, -1, -1, "Server not running").sendToTarget();
                 mmServerSocket.close();
             } catch (IOException e) {
             }
@@ -196,8 +224,8 @@ public class Home extends AppCompatActivity {
                         // Read from the InputStream
                         bytes = mmInStream.read(buffer);
                         // Send the obtained bytes to the UI activity
-                        main_handler.obtainMessage(MESSAGE_RECEIVED, bytes, -1, buffer).sendToTarget();
-                        bluetooth_handler.obtainMessage(UPDATE_BLUETOOTH_STATUS, -1, -1, "Message received").sendToTarget();
+                        mainHandler.obtainMessage(MESSAGE_RECEIVED, bytes, -1, buffer).sendToTarget();
+                        bluetoothHandler.obtainMessage(UPDATE_BLUETOOTH_STATUS, -1, -1, "Message received").sendToTarget();
                     } catch (IOException e) {
                         break;
                     }
@@ -209,6 +237,7 @@ public class Home extends AppCompatActivity {
                 try {
                     mmSocket.close();
                 } catch (IOException e) {
+                    e.printStackTrace();
                 }
             }
         }
